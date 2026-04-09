@@ -19,3 +19,4 @@ pushall.sh
 ci-user/
 user/
 os/vendor/
+.codex
