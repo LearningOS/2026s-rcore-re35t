@@ -262,6 +262,55 @@ impl MemorySet {
             false
         }
     }
+
+    /// Map a user framed area into the current address space.
+    pub fn mmap(&mut self, start: VirtAddr, end: VirtAddr, permission: MapPermission) -> bool {
+        let start_vpn = start.floor();
+        let end_vpn = end.ceil();
+        for vpn in VPNRange::new(start_vpn, end_vpn) {
+            if matches!(self.page_table.translate(vpn), Some(pte) if pte.is_valid()) {
+                return false;
+            }
+        }
+        let mut map_area = MapArea::new(start, end, MapType::Framed, permission);
+        if !map_area.try_map(&mut self.page_table) {
+            return false;
+        }
+        self.areas.push(map_area);
+        true
+    }
+
+    /// Unmap a range from the current address space.
+    pub fn munmap(&mut self, start: VirtAddr, end: VirtAddr) -> bool {
+        let start_vpn = start.floor();
+        let end_vpn = end.ceil();
+        for vpn in VPNRange::new(start_vpn, end_vpn) {
+            if !matches!(self.page_table.translate(vpn), Some(pte) if pte.is_valid()) {
+                return false;
+            }
+        }
+        for vpn in VPNRange::new(start_vpn, end_vpn) {
+            self.page_table.unmap(vpn);
+        }
+
+        let mut new_areas = Vec::new();
+        for mut area in self.areas.drain(..) {
+            let area_start = area.vpn_range.get_start();
+            let area_end = area.vpn_range.get_end();
+            if area_end <= start_vpn || end_vpn <= area_start {
+                new_areas.push(area);
+                continue;
+            }
+            if area_start < start_vpn {
+                new_areas.push(area.extract_sub_area(area_start, start_vpn));
+            }
+            if end_vpn < area_end {
+                new_areas.push(area.extract_sub_area(end_vpn, area_end));
+            }
+        }
+        self.areas = new_areas;
+        true
+    }
 }
 /// map area structure, controls a contiguous piece of virtual memory
 pub struct MapArea {
@@ -302,6 +351,24 @@ impl MapArea {
         let pte_flags = PTEFlags::from_bits(self.map_perm.bits).unwrap();
         page_table.map(vpn, ppn, pte_flags);
     }
+    pub fn try_map_one(&mut self, page_table: &mut PageTable, vpn: VirtPageNum) -> bool {
+        let ppn: PhysPageNum;
+        match self.map_type {
+            MapType::Identical => {
+                ppn = PhysPageNum(vpn.0);
+            }
+            MapType::Framed => {
+                let Some(frame) = frame_alloc() else {
+                    return false;
+                };
+                ppn = frame.ppn;
+                self.data_frames.insert(vpn, frame);
+            }
+        }
+        let pte_flags = PTEFlags::from_bits(self.map_perm.bits).unwrap();
+        page_table.map(vpn, ppn, pte_flags);
+        true
+    }
     #[allow(unused)]
     pub fn unmap_one(&mut self, page_table: &mut PageTable, vpn: VirtPageNum) {
         if self.map_type == MapType::Framed {
@@ -313,6 +380,14 @@ impl MapArea {
         for vpn in self.vpn_range {
             self.map_one(page_table, vpn);
         }
+    }
+    pub fn try_map(&mut self, page_table: &mut PageTable) -> bool {
+        for vpn in self.vpn_range {
+            if !self.try_map_one(page_table, vpn) {
+                return false;
+            }
+        }
+        true
     }
     #[allow(unused)]
     pub fn unmap(&mut self, page_table: &mut PageTable) {
@@ -354,6 +429,23 @@ impl MapArea {
                 break;
             }
             current_vpn.step();
+        }
+    }
+
+    pub fn extract_sub_area(&mut self, start: VirtPageNum, end: VirtPageNum) -> Self {
+        let mut data_frames = BTreeMap::new();
+        if self.map_type == MapType::Framed {
+            for vpn in VPNRange::new(start, end) {
+                if let Some(frame) = self.data_frames.remove(&vpn) {
+                    data_frames.insert(vpn, frame);
+                }
+            }
+        }
+        Self {
+            vpn_range: VPNRange::new(start, end),
+            data_frames,
+            map_type: self.map_type,
+            map_perm: self.map_perm,
         }
     }
 }

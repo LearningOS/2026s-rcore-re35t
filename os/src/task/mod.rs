@@ -15,11 +15,13 @@ mod switch;
 mod task;
 
 use crate::loader::{get_app_data, get_num_app};
+use crate::mm::{MapPermission, VirtAddr};
 use crate::sync::UPSafeCell;
 use crate::trap::TrapContext;
 use alloc::vec::Vec;
 use lazy_static::*;
 use switch::__switch;
+use crate::config::MAX_SYSCALL_NUM;
 pub use task::{TaskControlBlock, TaskStatus};
 
 pub use context::TaskContext;
@@ -133,6 +135,26 @@ impl TaskManager {
         inner.tasks[cur].change_program_brk(size)
     }
 
+    /// Map a user framed area for the current running task.
+    pub fn mmap_current(&self, start: usize, len: usize, permission: MapPermission) -> bool {
+        let mut inner = self.inner.exclusive_access();
+        let cur = inner.current_task;
+        inner.tasks[cur].memory_set.mmap(
+            VirtAddr::from(start),
+            VirtAddr::from(start + len),
+            permission,
+        )
+    }
+
+    /// Unmap a user area for the current running task.
+    pub fn munmap_current(&self, start: usize, len: usize) -> bool {
+        let mut inner = self.inner.exclusive_access();
+        let cur = inner.current_task;
+        inner.tasks[cur]
+            .memory_set
+            .munmap(VirtAddr::from(start), VirtAddr::from(start + len))
+    }
+
     /// Switch current `Running` task to the task we have found,
     /// or there is no `Ready` task and we can exit with all applications completed
     fn run_next_task(&self) {
@@ -152,6 +174,24 @@ impl TaskManager {
         } else {
             panic!("All applications completed!");
         }
+    }
+
+    fn add_current_syscall_count(&self, syscall_id: usize) {
+        if syscall_id >= MAX_SYSCALL_NUM {
+            return;
+        }
+        let mut inner = self.inner.exclusive_access();
+        let cur = inner.current_task;
+        inner.tasks[cur].syscall_times[syscall_id] += 1;
+    }
+
+    fn get_current_syscall_count(&self, syscall_id: usize) -> isize {
+        if syscall_id >= MAX_SYSCALL_NUM {
+            return -1;
+        }
+        let inner = self.inner.exclusive_access();
+        let cur = inner.current_task;
+        inner.tasks[cur].syscall_times[syscall_id] as isize
     }
 }
 
@@ -201,4 +241,24 @@ pub fn current_trap_cx() -> &'static mut TrapContext {
 /// Change the current 'Running' task's program break
 pub fn change_program_brk(size: i32) -> Option<usize> {
     TASK_MANAGER.change_current_program_brk(size)
+}
+
+/// Map a user framed area for the current running task.
+pub fn current_task_mmap(start: usize, len: usize, permission: MapPermission) -> bool {
+    TASK_MANAGER.mmap_current(start, len, permission)
+}
+
+/// Unmap a user area for the current running task.
+pub fn current_task_munmap(start: usize, len: usize) -> bool {
+    TASK_MANAGER.munmap_current(start, len)
+}
+
+/// Increase the current task's syscall counter for the given syscall id.
+pub fn add_current_syscall_count(syscall_id: usize) {
+    TASK_MANAGER.add_current_syscall_count(syscall_id);
+}
+
+/// Get the current task's syscall count for the given syscall id.
+pub fn get_current_syscall_count(syscall_id: usize) -> isize {
+    TASK_MANAGER.get_current_syscall_count(syscall_id)
 }
